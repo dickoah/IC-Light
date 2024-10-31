@@ -15,6 +15,8 @@ from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
 
+from transparent_background import Remover
+
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
@@ -49,7 +51,7 @@ unet.forward = hooked_unet_forward
 
 # Load
 
-model_path = './models/iclight_sd15_fc.safetensors'
+model_path = 'models/iclight_sd15_fc.safetensors'
 
 if not os.path.exists(model_path):
     download_url_to_file(url='https://huggingface.co/lllyasviel/ic-light/resolve/main/iclight_sd15_fc.safetensors', dst=model_path)
@@ -70,7 +72,6 @@ unet = unet.to(device=device, dtype=torch.float16)
 rmbg = rmbg.to(device=device, dtype=torch.float32)
 
 # SDP
-
 unet.set_attn_processor(AttnProcessor2_0())
 vae.set_attn_processor(AttnProcessor2_0())
 
@@ -216,20 +217,18 @@ def resize_without_crop(image, target_width, target_height):
     return np.array(resized_image)
 
 
+inspyrenet_remover = Remover()
 @torch.inference_mode()
-def run_rmbg(img, sigma=0.0):
-    H, W, C = img.shape
-    assert C == 3
-    k = (256.0 / float(H * W)) ** 0.5
-    feed = resize_without_crop(img, int(64 * round(W * k)), int(64 * round(H * k)))
-    feed = numpy2pytorch([feed]).to(device=device, dtype=torch.float32)
-    alpha = rmbg(feed)[0][0]
-    alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
-    alpha = alpha.movedim(1, -1)[0]
-    alpha = alpha.detach().float().cpu().numpy().clip(0, 1)
-    result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
-    return result.clip(0, 255).astype(np.uint8), alpha
-
+def run_rmbg(img):    
+    if not inspyrenet_remover: 
+        raise ValueError("The class variable self.inspyrenet_remover has not been initialized.")
+    try:
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(img)
+        mask = np.array(inspyrenet_remover.process(img.convert('RGB'), type="rgba").convert("RGB"))
+        return mask
+    except Exception as e:
+        raise RuntimeError(f"Error on remove_background_inspyrenet: {e}")
 
 @torch.inference_mode()
 def process(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
@@ -338,7 +337,7 @@ def process(input_fg, prompt, image_width, image_height, num_samples, seed, step
 
 @torch.inference_mode()
 def process_relight(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg)
+    input_fg= run_rmbg(input_fg)
     results = process(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
     return input_fg, results
 
@@ -384,7 +383,7 @@ with block:
     with gr.Row():
         with gr.Column():
             with gr.Row():
-                input_fg = gr.Image(source='upload', type="numpy", label="Image", height=480)
+                input_fg = gr.Image(type="numpy", label="Image", height=480)
                 output_bg = gr.Image(type="numpy", label="Preprocessed Foreground", height=480)
             prompt = gr.Textbox(label="Prompt")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],

@@ -11,9 +11,11 @@ from diffusers import StableDiffusionPipeline, StableDiffusionImg2ImgPipeline
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler
 from diffusers.models.attention_processor import AttnProcessor2_0
 from transformers import CLIPTextModel, CLIPTokenizer
-from briarmbg import BriaRMBG
+
 from enum import Enum
 from torch.hub import download_url_to_file
+
+from transparent_background import Remover
 
 
 # 'stablediffusionapi/realistic-vision-v51'
@@ -23,7 +25,7 @@ tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
 vae = AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
 unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
-rmbg = BriaRMBG.from_pretrained("briaai/RMBG-1.4")
+inspyrenet_remover = Remover()
 
 # Change UNet
 
@@ -67,7 +69,6 @@ device = torch.device('cuda')
 text_encoder = text_encoder.to(device=device, dtype=torch.float16)
 vae = vae.to(device=device, dtype=torch.bfloat16)
 unet = unet.to(device=device, dtype=torch.float16)
-rmbg = rmbg.to(device=device, dtype=torch.float32)
 
 # SDP
 
@@ -217,18 +218,17 @@ def resize_without_crop(image, target_width, target_height):
 
 
 @torch.inference_mode()
-def run_rmbg(img, sigma=0.0):
-    H, W, C = img.shape
-    assert C == 3
-    k = (256.0 / float(H * W)) ** 0.5
-    feed = resize_without_crop(img, int(64 * round(W * k)), int(64 * round(H * k)))
-    feed = numpy2pytorch([feed]).to(device=device, dtype=torch.float32)
-    alpha = rmbg(feed)[0][0]
-    alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
-    alpha = alpha.movedim(1, -1)[0]
-    alpha = alpha.detach().float().cpu().numpy().clip(0, 1)
-    result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
-    return result.clip(0, 255).astype(np.uint8), alpha
+def run_rmbg(img):    
+    if not inspyrenet_remover: 
+        raise ValueError("The class variable self.inspyrenet_remover has not been initialized.")
+    try:
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(img)
+        mask = np.array(inspyrenet_remover.process(img.convert('RGB'), type="rgba").convert("RGB"))
+        alpha = np.array(inspyrenet_remover.process(img.convert('RGB'), type="map").convert("L"))
+        return mask, alpha
+    except Exception as e:
+        raise RuntimeError(f"Error on remove_background_inspyrenet: {e}")
 
 
 @torch.inference_mode()
@@ -325,7 +325,7 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 
 @torch.inference_mode()
 def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg)
+    input_fg, _ = run_rmbg(input_fg)
     results, extra_images = process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
     return results + extra_images
@@ -410,8 +410,8 @@ with block:
     with gr.Row():
         with gr.Column():
             with gr.Row():
-                input_fg = gr.Image(source='upload', type="numpy", label="Foreground", height=480)
-                input_bg = gr.Image(source='upload', type="numpy", label="Background", height=480)
+                input_fg = gr.Image(sources='upload', type="numpy", label="Foreground", height=480)
+                input_bg = gr.Image(sources='upload', type="numpy", label="Background", height=480)
             prompt = gr.Textbox(label="Prompt")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],
                                  value=BGSource.UPLOAD.value,
@@ -451,14 +451,15 @@ with block:
             outputs=[result_gallery],
             run_on_click=True, examples_per_page=1024
         )
+
     ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source]
+    
+    def bg_gallery_selected(gal, evt: gr.SelectData):
+        return gal[evt.index]['name']
+    
     relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
     normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
     example_prompts.click(lambda x: x[0], inputs=example_prompts, outputs=prompt, show_progress=False, queue=False)
-
-    def bg_gallery_selected(gal, evt: gr.SelectData):
-        return gal[evt.index]['name']
-
     bg_gallery.select(bg_gallery_selected, inputs=bg_gallery, outputs=input_bg)
 
 
