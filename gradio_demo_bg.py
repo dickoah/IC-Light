@@ -455,7 +455,7 @@ with block:
     ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source]
     
     def bg_gallery_selected(gal, evt: gr.SelectData):
-        return gal[evt.index]['name']
+        return gal[evt.index][0]
     
     relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
     normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
