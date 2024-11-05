@@ -20,10 +20,14 @@ from transparent_background import Remover
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
-sd15_name = 'stablediffusionapi/realistic-vision-v51'
+# 'SG161222/Realistic_Vision_V5.1_noVAE'
+sd15_name = 'SG161222/Realistic_Vision_V6.0_B1_noVAE'
+sd15_vae_name = 'stabilityai/sd-vae-ft-mse'
+negative_prompt = "Negative Prompt: (deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, drawing, anime), text, cropped, out of frame, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck"
+
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
-vae = AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
+vae = AutoencoderKL.from_pretrained(sd15_vae_name, torch_dtype=torch.float16) #AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
 unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
 inspyrenet_remover = Remover()
 
@@ -218,17 +222,28 @@ def resize_without_crop(image, target_width, target_height):
 
 
 @torch.inference_mode()
-def run_rmbg(img):    
-    if not inspyrenet_remover: 
+def run_rmbg(img, sigma=0.0):
+    if not inspyrenet_remover:
         raise ValueError("The class variable self.inspyrenet_remover has not been initialized.")
+    
     try:
+        # Ensure `img` is a PIL image
         if not isinstance(img, Image.Image):
             img = Image.fromarray(img)
-        mask = np.array(inspyrenet_remover.process(img.convert('RGB'), type="rgba").convert("RGB"))
+        
+        # Process alpha and normalize it to the range [0, 1]
         alpha = np.array(inspyrenet_remover.process(img.convert('RGB'), type="map").convert("L"))
-        return mask, alpha
+        alpha = (alpha / 255.0)[..., np.newaxis]  # Normalize alpha to [0, 1] and add dimension for broadcasting
+
+        # Blend the background based on the `sigma` parameter
+        result = 127 + (np.array(img).astype(np.float32) - 127 + sigma) * alpha
+        result = result.clip(0, 255).astype(np.uint8)
+
+        return result, alpha.squeeze()  # Squeeze to keep alpha as 2D array for consistency
+    
     except Exception as e:
         raise RuntimeError(f"Error on remove_background_inspyrenet: {e}")
+
 
 
 @torch.inference_mode()
@@ -327,7 +342,7 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
     input_fg, _ = run_rmbg(input_fg)
     results, extra_images = process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source)
-    results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
+    results = [(x * 255.0).astype(np.uint8) for x in results]
     return results + extra_images
 
 
@@ -426,18 +441,17 @@ with block:
                     num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
                     seed = gr.Number(label="Seed", value=12345, precision=0)
                 with gr.Row():
-                    image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
-                    image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=640, step=64)
-
-            with gr.Accordion("Advanced options", open=False):
-                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=20, step=1)
-                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7.0, step=0.01)
-                highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
-                highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=0.9, value=0.5, step=0.01)
-                a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
-                n_prompt = gr.Textbox(label="Negative Prompt",
-                                      value='lowres, bad anatomy, bad hands, cropped, worst quality')
-                normal_button = gr.Button(value="Compute Normal (4x Slower)")
+                    image_width = gr.Slider(label="Image Width", minimum=256, maximum=2048, value=512, step=64)
+                    image_height = gr.Slider(label="Image Height", minimum=256, maximum=2048, value=640, step=64)
+                with gr.Accordion("Advanced options", open=False):
+                    steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=30, step=1)
+                    cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=2, step=0.01)
+                    lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.01)
+                    highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
+                    highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.01)
+                    a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
+                    n_prompt = gr.Textbox(label="Negative Prompt", value='worst quality, normal quality, low quality, low res, blurry, distortion, text, watermark, logo, banner, extra digits, cropped, jpeg artifacts, signature, username, error, sketch, duplicate, ugly, monochrome, horror, geometry, mutation, disgusting, bad anatomy, bad proportions, bad quality, deformed, disconnected limbs, out of frame, out of focus, dehydrated, disfigured, extra arms, extra limbs, extra hands, fused fingers, gross proportions, long neck, jpeg, malformed limbs, mutated, mutated hands, mutated limbs, missing arms, missing fingers, picture frame, poorly drawn hands, poorly drawn face, collage, pixel, pixelated, grainy, color aberration, amputee, autograph, bad illustration, beyond the borders, blank background, body out of frame, boring background, branding, cut off, dismembered, disproportioned, distorted, draft, duplicated features, extra fingers, extra legs, fault, flaw, grains, hazy, identifying mark, improper scale, incorrect physiology, incorrect ratio, indistinct, kitsch, low resolution, macabre, malformed, mark, misshapen, missing hands, missing legs, mistake, morbid, mutilated, off-screen, outside the picture, poorly drawn feet, printed words, render, repellent, replicate, reproduce, revolting dimensions, script, shortened, sign, split image, squint, storyboard, tiling, trimmed, unfocused, unattractive, unnatural pose, unreal engine, unsightly, written language')
+                    normal_button = gr.Button(value="Compute Normal (4x Slower)")
         with gr.Column():
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
     with gr.Row():
@@ -455,12 +469,30 @@ with block:
     ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source]
     
     def bg_gallery_selected(gal, evt: gr.SelectData):
-        return gal[evt.index][0]
+        return gal[evt.index][0]    
     
+    def update_dimensions(image):
+        """Extract image dimensions and return updated values for width and height sliders, 
+        ensuring they do not exceed 2048x2048 while maintaining the aspect ratio."""
+        if image is not None:
+            height, width = image.shape[:2]
+
+            # Calculate the scaling factor if dimensions exceed 2048
+            max_dim = 2048
+            if width > max_dim or height > max_dim:
+                scale = min(max_dim / width, max_dim / height)
+                width = int(width * scale)
+                height = int(height * scale)
+
+            return gr.update(value=width), gr.update(value=height)
+        return gr.update(), gr.update()
+    
+    input_bg.change(fn=update_dimensions, inputs=input_fg, outputs=[image_width, image_height])
+
     relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
     normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
     example_prompts.click(lambda x: x[0], inputs=example_prompts, outputs=prompt, show_progress=False, queue=False)
     bg_gallery.select(bg_gallery_selected, inputs=bg_gallery, outputs=input_bg)
 
 
-block.launch(server_name='0.0.0.0')
+block.launch(share=False)

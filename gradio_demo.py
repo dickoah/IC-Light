@@ -20,12 +20,16 @@ from transparent_background import Remover
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
-sd15_name = 'stablediffusionapi/realistic-vision-v51'
+# 'SG161222/Realistic_Vision_V5.1_noVAE'
+sd15_name = 'SG161222/Realistic_Vision_V6.0_B1_noVAE'
+sd15_vae_name = 'stabilityai/sd-vae-ft-mse'
+
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
-vae = AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
+vae = AutoencoderKL.from_pretrained(sd15_vae_name, torch_dtype=torch.float16) #AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
 unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
-rmbg = BriaRMBG.from_pretrained("briaai/RMBG-1.4")
+inspyrenet_remover = Remover()
+
 
 # Change UNet
 
@@ -69,14 +73,12 @@ device = torch.device('cuda')
 text_encoder = text_encoder.to(device=device, dtype=torch.float16)
 vae = vae.to(device=device, dtype=torch.bfloat16)
 unet = unet.to(device=device, dtype=torch.float16)
-rmbg = rmbg.to(device=device, dtype=torch.float32)
 
 # SDP
 unet.set_attn_processor(AttnProcessor2_0())
 vae.set_attn_processor(AttnProcessor2_0())
 
-# Samplers
-
+# Scheduler
 ddim_scheduler = DDIMScheduler(
     num_train_timesteps=1000,
     beta_start=0.00085,
@@ -104,7 +106,6 @@ dpmpp_2m_sde_karras_scheduler = DPMSolverMultistepScheduler(
 )
 
 # Pipelines
-
 t2i_pipe = StableDiffusionPipeline(
     vae=vae,
     text_encoder=text_encoder,
@@ -219,16 +220,28 @@ def resize_without_crop(image, target_width, target_height):
 
 inspyrenet_remover = Remover()
 @torch.inference_mode()
-def run_rmbg(img):    
-    if not inspyrenet_remover: 
+def run_rmbg(img, sigma=0.0):
+    if not inspyrenet_remover:
         raise ValueError("The class variable self.inspyrenet_remover has not been initialized.")
+    
     try:
+        # Ensure `img` is a PIL image
         if not isinstance(img, Image.Image):
             img = Image.fromarray(img)
-        mask = np.array(inspyrenet_remover.process(img.convert('RGB'), type="rgba").convert("RGB"))
-        return mask
+        
+        # Process alpha and normalize it to the range [0, 1]
+        alpha = np.array(inspyrenet_remover.process(img.convert('RGB'), type="map").convert("L"))
+        alpha = (alpha / 255.0)[..., np.newaxis]  # Normalize alpha to [0, 1] and add dimension for broadcasting
+
+        # Blend the background based on the `sigma` parameter
+        result = 127 + (np.array(img).astype(np.float32) - 127 + sigma) * alpha
+        result = result.clip(0, 255).astype(np.uint8)
+
+        return result, alpha.squeeze()  # Squeeze to keep alpha as 2D array for consistency
+    
     except Exception as e:
         raise RuntimeError(f"Error on remove_background_inspyrenet: {e}")
+    
 
 @torch.inference_mode()
 def process(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
@@ -337,7 +350,7 @@ def process(input_fg, prompt, image_width, image_height, num_samples, seed, step
 
 @torch.inference_mode()
 def process_relight(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
-    input_fg= run_rmbg(input_fg)
+    input_fg, _= run_rmbg(input_fg)
     results = process(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
     return input_fg, results
 
@@ -399,17 +412,17 @@ with block:
                     seed = gr.Number(label="Seed", value=12345, precision=0)
 
                 with gr.Row():
-                    image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
-                    image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=640, step=64)
+                    image_width = gr.Slider(label="Image Width", minimum=256, maximum=2048, value=512, step=64)
+                    image_height = gr.Slider(label="Image Height", minimum=256, maximum=2048, value=640, step=64)
 
             with gr.Accordion("Advanced options", open=False):
-                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=25, step=1)
+                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=50, step=1)
                 cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=2, step=0.01)
                 lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.01)
                 highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
                 highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.01)
                 a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
-                n_prompt = gr.Textbox(label="Negative Prompt", value='lowres, bad anatomy, bad hands, cropped, worst quality')
+                n_prompt = gr.Textbox(label="Negative Prompt", value='worst quality, normal quality, low quality, low res, blurry, distortion, text, watermark, logo, banner, extra digits, cropped, jpeg artifacts, signature, username, error, sketch, duplicate, ugly, monochrome, horror, geometry, mutation, disgusting, bad anatomy, bad proportions, bad quality, deformed, disconnected limbs, out of frame, out of focus, dehydrated, disfigured, extra arms, extra limbs, extra hands, fused fingers, gross proportions, long neck, jpeg, malformed limbs, mutated, mutated hands, mutated limbs, missing arms, missing fingers, picture frame, poorly drawn hands, poorly drawn face, collage, pixel, pixelated, grainy, color aberration, amputee, autograph, bad illustration, beyond the borders, blank background, body out of frame, boring background, branding, cut off, dismembered, disproportioned, distorted, draft, duplicated features, extra fingers, extra legs, fault, flaw, grains, hazy, identifying mark, improper scale, incorrect physiology, incorrect ratio, indistinct, kitsch, low resolution, macabre, malformed, mark, misshapen, missing hands, missing legs, mistake, morbid, mutilated, off-screen, outside the picture, poorly drawn feet, printed words, render, repellent, replicate, reproduce, revolting dimensions, script, shortened, sign, split image, squint, storyboard, tiling, trimmed, unfocused, unattractive, unnatural pose, unreal engine, unsightly, written language')
         with gr.Column():
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
     with gr.Row():
@@ -429,4 +442,4 @@ with block:
     example_quick_subjects.click(lambda x: x[0], inputs=example_quick_subjects, outputs=prompt, show_progress=False, queue=False)
 
 
-block.launch(server_name='0.0.0.0')
+block.launch(share=False)
