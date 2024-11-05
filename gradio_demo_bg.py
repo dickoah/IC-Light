@@ -7,8 +7,18 @@ import safetensors.torch as sf
 import db_examples
 
 from PIL import Image
-from diffusers import StableDiffusionPipeline, StableDiffusionImg2ImgPipeline
-from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler
+from diffusers import (
+    StableDiffusionPipeline, 
+    StableDiffusionImg2ImgPipeline
+)
+from diffusers import (
+    AutoencoderKL, 
+    UNet2DConditionModel, 
+    DDIMScheduler, 
+    TCDScheduler, 
+    EulerAncestralDiscreteScheduler, 
+    DPMSolverMultistepScheduler
+)
 from diffusers.models.attention_processor import AttnProcessor2_0
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -21,7 +31,7 @@ from transparent_background import Remover
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
 # 'SG161222/Realistic_Vision_V5.1_noVAE'
-sd15_name = 'SG161222/Realistic_Vision_V6.0_B1_noVAE'
+sd15_name = 'stablediffusionapi/realistic-vision-v51'
 sd15_vae_name = 'stabilityai/sd-vae-ft-mse'
 negative_prompt = "Negative Prompt: (deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, drawing, anime), text, cropped, out of frame, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck"
 
@@ -107,6 +117,8 @@ dpmpp_2m_sde_karras_scheduler = DPMSolverMultistepScheduler(
     steps_offset=1
 )
 
+tcd_scheduler = TCDScheduler.from_pretrained(sd15_name, subfolder="scheduler")
+
 # Pipelines
 
 t2i_pipe = StableDiffusionPipeline(
@@ -114,7 +126,7 @@ t2i_pipe = StableDiffusionPipeline(
     text_encoder=text_encoder,
     tokenizer=tokenizer,
     unet=unet,
-    scheduler=dpmpp_2m_sde_karras_scheduler,
+    scheduler=tcd_scheduler,
     safety_checker=None,
     requires_safety_checker=False,
     feature_extractor=None,
@@ -132,6 +144,7 @@ i2i_pipe = StableDiffusionImg2ImgPipeline(
     feature_extractor=None,
     image_encoder=None
 )
+
 
 
 @torch.inference_mode()
@@ -487,7 +500,7 @@ with block:
             return gr.update(value=width), gr.update(value=height)
         return gr.update(), gr.update()
     
-    input_bg.change(fn=update_dimensions, inputs=input_fg, outputs=[image_width, image_height])
+    input_fg.upload(fn=update_dimensions, inputs=input_fg, outputs=[image_width, image_height])
 
     relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
     normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])

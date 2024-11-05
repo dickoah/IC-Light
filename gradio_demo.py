@@ -7,11 +7,19 @@ import safetensors.torch as sf
 import db_examples
 
 from PIL import Image
-from diffusers import StableDiffusionPipeline, StableDiffusionImg2ImgPipeline
-from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler
+from diffusers import (
+    StableDiffusionPipeline, 
+    StableDiffusionImg2ImgPipeline
+)
+from diffusers import (
+    AutoencoderKL, 
+    UNet2DConditionModel, 
+    DDIMScheduler, 
+    EulerAncestralDiscreteScheduler, 
+    DPMSolverMultistepScheduler
+)
 from diffusers.models.attention_processor import AttnProcessor2_0
 from transformers import CLIPTextModel, CLIPTokenizer
-from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
 
@@ -21,7 +29,7 @@ from transparent_background import Remover
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
 # 'SG161222/Realistic_Vision_V5.1_noVAE'
-sd15_name = 'SG161222/Realistic_Vision_V6.0_B1_noVAE'
+sd15_name = 'stablediffusionapi/realistic-vision-v51'
 sd15_vae_name = 'stabilityai/sd-vae-ft-mse'
 
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
@@ -416,8 +424,8 @@ with block:
                     image_height = gr.Slider(label="Image Height", minimum=256, maximum=2048, value=640, step=64)
 
             with gr.Accordion("Advanced options", open=False):
-                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=50, step=1)
-                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=2, step=0.01)
+                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=30, step=1)
+                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7, step=0.01)
                 lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.01)
                 highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
                 highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.01)
@@ -426,7 +434,7 @@ with block:
         with gr.Column():
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
     with gr.Row():
-        dummy_image_for_outputs = gr.Image(visible=False, label='Result')
+        dummy_image_for_outputs = gr.Image(visible=False, label='Result', format="png")
         gr.Examples(
             fn=lambda *args: ([args[-1]], None),
             examples=db_examples.foreground_conditioned_examples,
@@ -436,6 +444,25 @@ with block:
             outputs=[result_gallery, output_bg],
             run_on_click=True, examples_per_page=1024
         )
+    
+    def update_dimensions(image):
+        """Extract image dimensions and return updated values for width and height sliders, 
+        ensuring they do not exceed 2048x2048 while maintaining the aspect ratio."""
+        if image is not None:
+            height, width = image.shape[:2]
+
+            # Calculate the scaling factor if dimensions exceed 2048
+            max_dim = 2048
+            if width > max_dim or height > max_dim:
+                scale = min(max_dim / width, max_dim / height)
+                width = int(width * scale)
+                height = int(height * scale)
+
+            return gr.update(value=width), gr.update(value=height)
+        return gr.update(), gr.update()
+    
+    input_fg.upload(fn=update_dimensions, inputs=input_fg, outputs=[image_width, image_height])
+
     ips = [input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source]
     relight_button.click(fn=process_relight, inputs=ips, outputs=[output_bg, result_gallery])
     example_quick_prompts.click(lambda x, y: ', '.join(y.split(', ')[:2] + [x[0]]), inputs=[example_quick_prompts, prompt], outputs=prompt, show_progress=False, queue=False)
