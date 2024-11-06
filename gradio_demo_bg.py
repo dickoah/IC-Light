@@ -7,6 +7,7 @@ import safetensors.torch as sf
 import db_examples
 
 from PIL import Image
+
 from diffusers import (
     StableDiffusionPipeline, 
     StableDiffusionImg2ImgPipeline
@@ -20,9 +21,14 @@ from diffusers import (
     DPMSolverMultistepScheduler
 )
 from diffusers.models.attention_processor import AttnProcessor2_0
-from transformers import CLIPTextModel, CLIPTokenizer
+
+from transformers import (
+    CLIPTextModel, 
+    CLIPTokenizer
+)
 
 from enum import Enum
+
 from torch.hub import download_url_to_file
 
 from transparent_background import Remover
@@ -31,13 +37,14 @@ from transparent_background import Remover
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
 # 'SG161222/Realistic_Vision_V5.1_noVAE'
+# 'fluently/Fluently-v4'
+# 'emilianJR/epiCRealism'
 sd15_name = 'stablediffusionapi/realistic-vision-v51'
 sd15_vae_name = 'stabilityai/sd-vae-ft-mse'
-negative_prompt = "Negative Prompt: (deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, drawing, anime), text, cropped, out of frame, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck"
 
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
-vae = AutoencoderKL.from_pretrained(sd15_vae_name, torch_dtype=torch.float16) #AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
+vae = AutoencoderKL.from_pretrained(sd15_name, subfolder="vae") #AutoencoderKL.from_pretrained(sd15_vae_name, torch_dtype=torch.float16) #AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
 unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
 inspyrenet_remover = Remover()
 
@@ -239,23 +246,19 @@ def run_rmbg(img, sigma=0.0):
     if not inspyrenet_remover:
         raise ValueError("The class variable self.inspyrenet_remover has not been initialized.")
     
-    try:
-        # Ensure `img` is a PIL image
-        if not isinstance(img, Image.Image):
-            img = Image.fromarray(img)
-        
-        # Process alpha and normalize it to the range [0, 1]
-        alpha = np.array(inspyrenet_remover.process(img.convert('RGB'), type="map").convert("L"))
-        alpha = (alpha / 255.0)[..., np.newaxis]  # Normalize alpha to [0, 1] and add dimension for broadcasting
-
-        # Blend the background based on the `sigma` parameter
-        result = 127 + (np.array(img).astype(np.float32) - 127 + sigma) * alpha
-        result = result.clip(0, 255).astype(np.uint8)
-
-        return result, alpha.squeeze()  # Squeeze to keep alpha as 2D array for consistency
+    # Ensure `img` is a PIL image
+    if not isinstance(img, Image.Image):
+        img = Image.fromarray(img)
     
-    except Exception as e:
-        raise RuntimeError(f"Error on remove_background_inspyrenet: {e}")
+    # Process alpha and normalize it to the range [0, 1]
+    alpha = np.array(inspyrenet_remover.process(img.convert('RGB'), type="map").convert("L"))
+    alpha = (alpha / 255.0)[..., np.newaxis]  # Normalize alpha to [0, 1] and add dimension for broadcasting
+
+    # Blend the background based on the `sigma` parameter
+    result = 127 + (np.array(img).astype(np.float32) - 127 + sigma) * alpha
+    result = result.clip(0, 255).astype(np.uint8)
+
+    return result, alpha.squeeze()  # Squeeze to keep alpha as 2D array for consistency
 
 
 
@@ -353,11 +356,31 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 
 @torch.inference_mode()
 def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, _ = run_rmbg(input_fg)
-    results, extra_images = process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source)
+    # Run background removal on the foreground input
+    input_fg, alpha = run_rmbg(input_fg)
+    
+    # Process relighting with the specified parameters
+    results, extra_images = process(
+        input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps,
+        a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source
+    )
     results = [(x * 255.0).astype(np.uint8) for x in results]
-    return results + extra_images
+    
+    # Extract background image from extra_images
+    _, image_bg = extra_images[0], extra_images[1]
+    
+    # Resize alpha mask to match the output dimensions and scale it to 8-bit
+    alpha = (alpha * 255.0).clip(0, 255).astype(np.uint8)
+    
+    # Convert images to PIL format and ensure they have the same dimensions
+    image_bg = Image.fromarray(image_bg).convert("RGBA").resize((image_width, image_height))
+    alpha_mask = Image.fromarray(alpha).convert("L").resize((image_width, image_height))
+    results = [Image.fromarray(x).convert("RGBA").resize((image_width, image_height)) for x in results]
 
+    # Composite each result image over the background using the alpha mask
+    composited_results = [Image.composite(fg, image_bg, alpha_mask) for fg in results]
+
+    return composited_results + extra_images
 
 @torch.inference_mode()
 def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
@@ -417,6 +440,20 @@ quick_prompts = [
     'handsome man, natural lighting',
     'beautiful woman, neo punk lighting, cyberpunk',
     'handsome man, neo punk lighting, cyberpunk',
+    'sunshine from window',
+    'neon light, city',
+    'sunset over sea',
+    'golden time',
+    'sci-fi RGB glowing, cyberpunk',
+    'natural lighting',
+    'warm atmosphere, at home, bedroom',
+    'magic lit',
+    'evil, gothic, Yharnam',
+    'light and shadow',
+    'shadow from window',
+    'soft studio lighting',
+    'home atmosphere, cozy bedroom illumination',
+    'neon, Wong Kar-wai, warm'
 ]
 quick_prompts = [[x] for x in quick_prompts]
 
@@ -452,21 +489,20 @@ with block:
             with gr.Group():
                 with gr.Row():
                     num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
-                    seed = gr.Number(label="Seed", value=12345, precision=0)
+                    seed = gr.Number(label="Seed", value=-1, precision=0)
                 with gr.Row():
                     image_width = gr.Slider(label="Image Width", minimum=256, maximum=2048, value=512, step=64)
                     image_height = gr.Slider(label="Image Height", minimum=256, maximum=2048, value=640, step=64)
                 with gr.Accordion("Advanced options", open=False):
                     steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=30, step=1)
-                    cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=2, step=0.01)
-                    lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.01)
-                    highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
-                    highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.01)
+                    cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=2, step=0.5)
+                    highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.05)
+                    highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1, step=0.01)
                     a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
                     n_prompt = gr.Textbox(label="Negative Prompt", value='worst quality, normal quality, low quality, low res, blurry, distortion, text, watermark, logo, banner, extra digits, cropped, jpeg artifacts, signature, username, error, sketch, duplicate, ugly, monochrome, horror, geometry, mutation, disgusting, bad anatomy, bad proportions, bad quality, deformed, disconnected limbs, out of frame, out of focus, dehydrated, disfigured, extra arms, extra limbs, extra hands, fused fingers, gross proportions, long neck, jpeg, malformed limbs, mutated, mutated hands, mutated limbs, missing arms, missing fingers, picture frame, poorly drawn hands, poorly drawn face, collage, pixel, pixelated, grainy, color aberration, amputee, autograph, bad illustration, beyond the borders, blank background, body out of frame, boring background, branding, cut off, dismembered, disproportioned, distorted, draft, duplicated features, extra fingers, extra legs, fault, flaw, grains, hazy, identifying mark, improper scale, incorrect physiology, incorrect ratio, indistinct, kitsch, low resolution, macabre, malformed, mark, misshapen, missing hands, missing legs, mistake, morbid, mutilated, off-screen, outside the picture, poorly drawn feet, printed words, render, repellent, replicate, reproduce, revolting dimensions, script, shortened, sign, split image, squint, storyboard, tiling, trimmed, unfocused, unattractive, unnatural pose, unreal engine, unsightly, written language')
                     normal_button = gr.Button(value="Compute Normal (4x Slower)")
         with gr.Column():
-            result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
+            result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs', format="png")
     with gr.Row():
         dummy_image_for_outputs = gr.Image(visible=False, label='Result')
         gr.Examples(

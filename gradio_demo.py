@@ -15,12 +15,19 @@ from diffusers import (
     AutoencoderKL, 
     UNet2DConditionModel, 
     DDIMScheduler, 
+    TCDScheduler, 
     EulerAncestralDiscreteScheduler, 
     DPMSolverMultistepScheduler
 )
 from diffusers.models.attention_processor import AttnProcessor2_0
-from transformers import CLIPTextModel, CLIPTokenizer
+
+from transformers import (
+    CLIPTextModel, 
+    CLIPTokenizer
+)
+
 from enum import Enum
+
 from torch.hub import download_url_to_file
 
 from transparent_background import Remover
@@ -34,7 +41,7 @@ sd15_vae_name = 'stabilityai/sd-vae-ft-mse'
 
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
-vae = AutoencoderKL.from_pretrained(sd15_vae_name, torch_dtype=torch.float16) #AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
+vae = AutoencoderKL.from_pretrained(sd15_name, subfolder="vae") #AutoencoderKL.from_pretrained(sd15_vae_name, torch_dtype=torch.float16) #AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
 unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
 inspyrenet_remover = Remover()
 
@@ -112,6 +119,8 @@ dpmpp_2m_sde_karras_scheduler = DPMSolverMultistepScheduler(
     use_karras_sigmas=True,
     steps_offset=1
 )
+
+tcd_scheduler = TCDScheduler.from_pretrained(sd15_name, subfolder="scheduler")
 
 # Pipelines
 t2i_pipe = StableDiffusionPipeline(
@@ -352,8 +361,9 @@ def process(input_fg, prompt, image_width, image_height, num_samples, seed, step
     ).images.to(vae.dtype) / vae.config.scaling_factor
 
     pixels = vae.decode(latents).sample
+    pixels = pytorch2numpy(pixels, quant=False)
 
-    return pytorch2numpy(pixels)
+    return pixels
 
 
 @torch.inference_mode()
@@ -425,10 +435,10 @@ with block:
 
             with gr.Accordion("Advanced options", open=False):
                 steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=30, step=1)
-                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7, step=0.01)
-                lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.01)
-                highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
-                highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.01)
+                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7, step=0.5)
+                lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.05)
+                highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.1)
+                highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1., step=0.1)
                 a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
                 n_prompt = gr.Textbox(label="Negative Prompt", value='worst quality, normal quality, low quality, low res, blurry, distortion, text, watermark, logo, banner, extra digits, cropped, jpeg artifacts, signature, username, error, sketch, duplicate, ugly, monochrome, horror, geometry, mutation, disgusting, bad anatomy, bad proportions, bad quality, deformed, disconnected limbs, out of frame, out of focus, dehydrated, disfigured, extra arms, extra limbs, extra hands, fused fingers, gross proportions, long neck, jpeg, malformed limbs, mutated, mutated hands, mutated limbs, missing arms, missing fingers, picture frame, poorly drawn hands, poorly drawn face, collage, pixel, pixelated, grainy, color aberration, amputee, autograph, bad illustration, beyond the borders, blank background, body out of frame, boring background, branding, cut off, dismembered, disproportioned, distorted, draft, duplicated features, extra fingers, extra legs, fault, flaw, grains, hazy, identifying mark, improper scale, incorrect physiology, incorrect ratio, indistinct, kitsch, low resolution, macabre, malformed, mark, misshapen, missing hands, missing legs, mistake, morbid, mutilated, off-screen, outside the picture, poorly drawn feet, printed words, render, repellent, replicate, reproduce, revolting dimensions, script, shortened, sign, split image, squint, storyboard, tiling, trimmed, unfocused, unattractive, unnatural pose, unreal engine, unsightly, written language')
         with gr.Column():
