@@ -206,7 +206,6 @@ def pytorch2numpy(imgs, quant=True):
         results.append(y)
     return results
 
-
 @torch.inference_mode()
 def numpy2pytorch(imgs):
     h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
@@ -261,28 +260,35 @@ def run_rmbg(img, sigma=0.0):
     
 
 @torch.inference_mode()
-def process(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
+def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
     bg_source = BGSource(bg_source)
-    input_bg = None
 
     if bg_source == BGSource.NONE:
         pass
     elif bg_source == BGSource.LEFT:
         gradient = np.linspace(255, 0, image_width)
         image = np.tile(gradient, (image_height, 1))
-        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+        light_map = np.stack((image,) * 3, axis=-1).astype(np.uint8)  
+        # input_bg = ((input_bg * (light_map/255.))).clip(0, 255).astype(np.uint8) if input_bg is not None else light_map
+        input_bg = light_map  if input_bg is None else input_bg
     elif bg_source == BGSource.RIGHT:
         gradient = np.linspace(0, 255, image_width)
         image = np.tile(gradient, (image_height, 1))
-        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+        light_map = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+        # input_bg = ((input_bg * (light_map/255.))).clip(0, 255).astype(np.uint8) if input_bg is not None else light_map
+        input_bg = light_map  if input_bg is None else input_bg
     elif bg_source == BGSource.TOP:
         gradient = np.linspace(255, 0, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
-        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+        light_map = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+        # input_bg = ((input_bg * (light_map/255.))).clip(0, 255).astype(np.uint8) if input_bg is not None else light_map
+        input_bg = light_map  if input_bg is None else input_bg
     elif bg_source == BGSource.BOTTOM:
         gradient = np.linspace(0, 255, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
-        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+        light_map = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+        # input_bg = ((input_bg * (light_map/255.))).clip(0, 255).astype(np.uint8) if input_bg is not None else light_map
+        input_bg = light_map  if input_bg is None else input_bg
     else:
         raise 'Wrong initial latent!'
 
@@ -367,10 +373,26 @@ def process(input_fg, prompt, image_width, image_height, num_samples, seed, step
 
 
 @torch.inference_mode()
-def process_relight(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
-    input_fg, _= run_rmbg(input_fg)
-    results = process(input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
-    return input_fg, results
+def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
+    input_fg, alpha = run_rmbg(input_fg)
+    results = process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
+
+    if input_bg is not None:        
+        # Resize alpha mask to match the output dimensions and scale it to 8-bit
+        alpha = (alpha * 255.0).clip(0, 255).astype(np.uint8)
+        
+        # Convert images to PIL format and ensure they have the same dimensions
+        image_bg = Image.fromarray(input_bg.astype(np.uint8)).convert("RGBA").resize((image_width, image_height))
+        alpha_mask = Image.fromarray(alpha).convert("L").resize((image_width, image_height))
+        
+        # Ensure results are in uint8 before converting to PIL
+        results = [Image.fromarray((x * 255).clip(0, 255).astype(np.uint8)).convert("RGBA").resize((image_width, image_height)) for x in results]
+
+        # Composite each result image over the background using the alpha mask
+        composited_results = [Image.composite(fg, image_bg, alpha_mask) for fg in results]
+        return input_bg, composited_results
+    else: 
+        return input_fg, results
 
 
 quick_prompts = [
@@ -414,8 +436,8 @@ with block:
     with gr.Row():
         with gr.Column():
             with gr.Row():
-                input_fg = gr.Image(type="numpy", label="Image", height=480)
-                output_bg = gr.Image(type="numpy", label="Preprocessed Foreground", height=480)
+                input_fg = gr.Image(type="numpy", label="Image", sources=["upload", "webcam", "clipboard"], height=480, interactive=True)
+                input_bg = gr.Image(type="numpy", label="Preprocessed Foreground", sources=["upload", "webcam", "clipboard"], height=480, interactive=True)
             prompt = gr.Textbox(label="Prompt")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],
                                  value=BGSource.NONE.value,
@@ -427,22 +449,22 @@ with block:
             with gr.Group():
                 with gr.Row():
                     num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
-                    seed = gr.Number(label="Seed", value=12345, precision=0)
+                    seed = gr.Number(label="Seed", value=-1, precision=0)
 
                 with gr.Row():
                     image_width = gr.Slider(label="Image Width", minimum=256, maximum=2048, value=512, step=64)
                     image_height = gr.Slider(label="Image Height", minimum=256, maximum=2048, value=640, step=64)
 
             with gr.Accordion("Advanced options", open=False):
-                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=30, step=1)
-                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7, step=0.5)
-                lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.05)
+                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=10, step=1)
+                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=3.5, step=0.5)
+                lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.75, step=0.05)
                 highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.1)
                 highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1., step=0.1)
                 a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
                 n_prompt = gr.Textbox(label="Negative Prompt", value='worst quality, normal quality, low quality, low res, blurry, distortion, text, watermark, logo, banner, extra digits, cropped, jpeg artifacts, signature, username, error, sketch, duplicate, ugly, monochrome, horror, geometry, mutation, disgusting, bad anatomy, bad proportions, bad quality, deformed, disconnected limbs, out of frame, out of focus, dehydrated, disfigured, extra arms, extra limbs, extra hands, fused fingers, gross proportions, long neck, jpeg, malformed limbs, mutated, mutated hands, mutated limbs, missing arms, missing fingers, picture frame, poorly drawn hands, poorly drawn face, collage, pixel, pixelated, grainy, color aberration, amputee, autograph, bad illustration, beyond the borders, blank background, body out of frame, boring background, branding, cut off, dismembered, disproportioned, distorted, draft, duplicated features, extra fingers, extra legs, fault, flaw, grains, hazy, identifying mark, improper scale, incorrect physiology, incorrect ratio, indistinct, kitsch, low resolution, macabre, malformed, mark, misshapen, missing hands, missing legs, mistake, morbid, mutilated, off-screen, outside the picture, poorly drawn feet, printed words, render, repellent, replicate, reproduce, revolting dimensions, script, shortened, sign, split image, squint, storyboard, tiling, trimmed, unfocused, unattractive, unnatural pose, unreal engine, unsightly, written language')
         with gr.Column():
-            result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
+            result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs', format="png")
     with gr.Row():
         dummy_image_for_outputs = gr.Image(visible=False, label='Result', format="png")
         gr.Examples(
@@ -451,7 +473,7 @@ with block:
             inputs=[
                 input_fg, prompt, bg_source, image_width, image_height, seed, dummy_image_for_outputs
             ],
-            outputs=[result_gallery, output_bg],
+            outputs=[result_gallery, input_bg],
             run_on_click=True, examples_per_page=1024
         )
     
@@ -473,8 +495,8 @@ with block:
     
     input_fg.upload(fn=update_dimensions, inputs=input_fg, outputs=[image_width, image_height])
 
-    ips = [input_fg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source]
-    relight_button.click(fn=process_relight, inputs=ips, outputs=[output_bg, result_gallery])
+    ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source]
+    relight_button.click(fn=process_relight, inputs=ips, outputs=[input_bg, result_gallery])
     example_quick_prompts.click(lambda x, y: ', '.join(y.split(', ')[:2] + [x[0]]), inputs=[example_quick_prompts, prompt], outputs=prompt, show_progress=False, queue=False)
     example_quick_subjects.click(lambda x: x[0], inputs=example_quick_subjects, outputs=prompt, show_progress=False, queue=False)
 
