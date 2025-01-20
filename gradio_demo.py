@@ -206,6 +206,7 @@ def pytorch2numpy(imgs, quant=True):
         results.append(y)
     return results
 
+
 @torch.inference_mode()
 def numpy2pytorch(imgs):
     h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
@@ -295,10 +296,8 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
     rng = torch.Generator(device=device).manual_seed(int(seed))
 
     fg = resize_and_center_crop(input_fg, image_width, image_height)
-
     concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
-
     conds, unconds = encode_prompt_pair(positive_prompt=prompt + ', ' + a_prompt, negative_prompt=n_prompt)
 
     if input_bg is None:
@@ -390,9 +389,14 @@ def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_s
 
         # Composite each result image over the background using the alpha mask
         composited_results = [Image.composite(fg, image_bg, alpha_mask) for fg in results]
-        return input_bg, composited_results
+        outputs = input_bg, composited_results
     else: 
-        return input_fg, results
+        outputs = input_fg, results
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return outputs
 
 
 quick_prompts = [

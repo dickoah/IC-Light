@@ -153,6 +153,15 @@ i2i_pipe = StableDiffusionImg2ImgPipeline(
 )
 
 
+def lum(img):
+    out = np.zeros(img.shape, dtype=np.float32) 
+    luminance = np.dot(img[...,:3], [0.2989, 0.5870, 0.1140])
+    out[:,:,0] = out[:,:,1] = out[:,:,2] = luminance  
+    if img.shape[2] > 3:
+        out[:,:,3] = img[:,:,3]    
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    return out
+
 
 @torch.inference_mode()
 def encode_prompt_inner(txt: str):
@@ -255,15 +264,14 @@ def run_rmbg(img, sigma=0.0):
     alpha = (alpha / 255.0)[..., np.newaxis]  # Normalize alpha to [0, 1] and add dimension for broadcasting
 
     # Blend the background based on the `sigma` parameter
-    result = 127 + (np.array(img).astype(np.float32) - 127 + sigma) * alpha
+    result = 127.5 + (np.array(img).astype(np.float32) - 127.5 + sigma) * alpha
     result = result.clip(0, 255).astype(np.uint8)
 
     return result, alpha.squeeze()  # Squeeze to keep alpha as 2D array for consistency
 
 
-
 @torch.inference_mode()
-def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
+def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
     bg_source = BGSource(bg_source)
 
     if bg_source == BGSource.UPLOAD:
@@ -301,12 +309,29 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 
     conds, unconds = encode_prompt_pair(positive_prompt=prompt + ', ' + a_prompt, negative_prompt=n_prompt)
 
-    latents = t2i_pipe(
+    # latents = t2i_pipe(
+    #     prompt_embeds=conds,
+    #     negative_prompt_embeds=unconds,
+    #     width=image_width,
+    #     height=image_height,
+    #     num_inference_steps=steps,
+    #     num_images_per_prompt=num_samples,
+    #     generator=rng,
+    #     output_type='latent',
+    #     guidance_scale=cfg,
+    #     cross_attention_kwargs={'concat_conds': concat_conds},
+    # ).images.to(vae.dtype) / vae.config.scaling_factor
+    
+    bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
+    bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
+    latents = i2i_pipe(
+        image=bg_latent,
+        strength=lowres_denoise,
         prompt_embeds=conds,
         negative_prompt_embeds=unconds,
         width=image_width,
         height=image_height,
-        num_inference_steps=steps,
+        num_inference_steps=int(round(steps / lowres_denoise)),
         num_images_per_prompt=num_samples,
         generator=rng,
         output_type='latent',
@@ -329,6 +354,7 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
     fg = resize_and_center_crop(input_fg, image_width, image_height)
     bg = resize_and_center_crop(input_bg, image_width, image_height)
+    bg_lum = resize_and_center_crop(lum(input_bg), image_width, image_height)
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
@@ -355,14 +381,14 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 
 
 @torch.inference_mode()
-def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
+def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
     # Run background removal on the foreground input
     input_fg, alpha = run_rmbg(input_fg)
     
     # Process relighting with the specified parameters
     results, extra_images = process(
         input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps,
-        a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source
+        a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source
     )
     results = [(x * 255.0).astype(np.uint8) for x in results]
     
@@ -380,10 +406,13 @@ def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_s
     # Composite each result image over the background using the alpha mask
     composited_results = [Image.composite(fg, image_bg, alpha_mask) for fg in results]
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return composited_results + extra_images
 
 @torch.inference_mode()
-def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
+def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
     input_fg, matting = run_rmbg(input_fg, sigma=16)
 
     print('left ...')
@@ -428,6 +457,10 @@ def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_sa
 
     results = [normal, left, right, bottom, top] + inner_results
     results = [(x * 127.5 + 127.5).clip(0, 255).astype(np.uint8) for x in results]
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return results
 
 
@@ -496,6 +529,7 @@ with block:
                 with gr.Accordion("Advanced options", open=False):
                     steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=30, step=1)
                     cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=2, step=0.5)
+                    lowres_denoise = gr.Slider(label="Lowres Denoise", minimum=0.1, maximum=1.0, value=0.7, step=0.05)
                     highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.05)
                     highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1, step=0.01)
                     a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
@@ -515,7 +549,7 @@ with block:
             run_on_click=True, examples_per_page=1024
         )
 
-    ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source]
+    ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source]
     
     def bg_gallery_selected(gal, evt: gr.SelectData):
         return gal[evt.index][0]    
