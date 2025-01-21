@@ -36,7 +36,8 @@ from transparent_background import Remover
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
 # 'SG161222/Realistic_Vision_V5.1_noVAE'
-sd15_name = 'stablediffusionapi/realistic-vision-v51'
+# 'stablediffusionapi/epicrealism5'
+sd15_name = 'stablediffusionapi/epicrealism5'
 sd15_vae_name = 'stabilityai/sd-vae-ft-mse'
 
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
@@ -128,7 +129,7 @@ t2i_pipe = StableDiffusionPipeline(
     text_encoder=text_encoder,
     tokenizer=tokenizer,
     unet=unet,
-    scheduler=dpmpp_2m_sde_karras_scheduler,
+    scheduler=ddim_scheduler,
     safety_checker=None,
     requires_safety_checker=False,
     feature_extractor=None,
@@ -140,7 +141,7 @@ i2i_pipe = StableDiffusionImg2ImgPipeline(
     text_encoder=text_encoder,
     tokenizer=tokenizer,
     unet=unet,
-    scheduler=dpmpp_2m_sde_karras_scheduler,
+    scheduler=tcd_scheduler,
     safety_checker=None,
     requires_safety_checker=False,
     feature_extractor=None,
