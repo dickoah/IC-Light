@@ -58,14 +58,12 @@ with torch.no_grad():
 
 unet_original_forward = unet.forward
 
-
 def hooked_unet_forward(sample, timestep, encoder_hidden_states, **kwargs):
     c_concat = kwargs['cross_attention_kwargs']['concat_conds'].to(sample)
     c_concat = torch.cat([c_concat] * (sample.shape[0] // c_concat.shape[0]), dim=0)
     new_sample = torch.cat([sample, c_concat], dim=1)
     kwargs['cross_attention_kwargs'] = {}
     return unet_original_forward(new_sample, timestep, encoder_hidden_states, **kwargs)
-
 
 unet.forward = hooked_unet_forward
 
@@ -129,7 +127,7 @@ t2i_pipe = StableDiffusionPipeline(
     text_encoder=text_encoder,
     tokenizer=tokenizer,
     unet=unet,
-    scheduler=ddim_scheduler,
+    scheduler=tcd_scheduler,
     safety_checker=None,
     requires_safety_checker=False,
     feature_extractor=None,
@@ -141,7 +139,7 @@ i2i_pipe = StableDiffusionImg2ImgPipeline(
     text_encoder=text_encoder,
     tokenizer=tokenizer,
     unet=unet,
-    scheduler=tcd_scheduler,
+    scheduler=ddim_scheduler,
     safety_checker=None,
     requires_safety_checker=False,
     feature_extractor=None,
@@ -263,6 +261,9 @@ def run_rmbg(img, sigma=0.0):
 
 @torch.inference_mode()
 def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
+    
+    guidance_rescale=0.7
+
     bg_source = BGSource(bg_source)
 
     if bg_source == BGSource.NONE:
@@ -312,6 +313,7 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
             generator=rng,
             output_type='latent',
             guidance_scale=cfg,
+            guidance_rescale=guidance_rescale,
             cross_attention_kwargs={'concat_conds': concat_conds},
         ).images.to(vae.dtype) / vae.config.scaling_factor
     else:
@@ -330,6 +332,7 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
             generator=rng,
             output_type='latent',
             guidance_scale=cfg,
+            guidance_rescale=guidance_rescale,
             cross_attention_kwargs={'concat_conds': concat_conds},
         ).images.to(vae.dtype) / vae.config.scaling_factor
 
@@ -363,6 +366,7 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
         generator=rng,
         output_type='latent',
         guidance_scale=cfg,
+        guidance_rescale=guidance_rescale,
         cross_attention_kwargs={'concat_conds': concat_conds},
     ).images.to(vae.dtype) / vae.config.scaling_factor
 
@@ -389,7 +393,9 @@ def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_s
         results = [Image.fromarray((x * 255).clip(0, 255).astype(np.uint8)).convert("RGBA").resize((image_width, image_height)) for x in results]
 
         # Composite each result image over the background using the alpha mask
-        composited_results = [Image.composite(fg, image_bg, alpha_mask) for fg in results]
+        composited_results = [Image.composite(fg, image_bg, alpha_mask) for fg in results]    
+        composited_results.append(input_bg)    
+        composited_results.append(input_fg)
         outputs = input_bg, composited_results
     else: 
         outputs = input_fg, results
